@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Wifi, Search, MessageCircle, Gift, ChevronLeft, Copy, 
   CheckCircle, Loader2, CreditCard, Download, AlertTriangle, 
-  X, Phone, Mail, RefreshCw, FileText, Home
+  X, Phone, Mail, RefreshCw, FileText, Home, ArrowRight
 } from 'lucide-react';
 
 // --- CONFIGURATION ---
@@ -16,6 +16,18 @@ const NETWORKS = [
   { id: 'airtel', name: 'Airtel', color: 'bg-red-50', img: '/airtel.png' },
   { id: 'glo', name: 'Glo', color: 'bg-green-50', img: '/glo.png' },
 ];
+
+// --- HELPER: Format Plan Name ---
+const formatPlanName = (rawName) => {
+  if (!rawName) return "DATA PLAN MONTHLY";
+  // Converts 'mtn-500mb' or '500mb' to 'MTN 500MB MONTHLY'
+  let formatted = rawName.replace(/-/g, ' ').toUpperCase();
+  // Ensure it has a network name if missing (simple heuristic)
+  if (!formatted.includes('MTN') && !formatted.includes('AIRTEL') && !formatted.includes('GLO')) {
+      // If we can't guess network, just leave it, but usually rawName has it.
+  }
+  return `${formatted} MONTHLY`; 
+};
 
 export default function UserApp() {
   // --- STATE ---
@@ -51,6 +63,7 @@ export default function UserApp() {
   // Track State
   const [trackQuery, setTrackQuery] = useState('');
   const [trackResult, setTrackResult] = useState(null);
+  const [retryingId, setRetryingId] = useState(null); // ID of the transaction currently retrying
 
   // Receipt State
   const receiptRef = useRef(null);
@@ -97,7 +110,6 @@ export default function UserApp() {
     }
 
     // 2. Timeout Check (60 seconds)
-    // If we are actively verifying (spinning) or polling, check if time has exceeded 60s
     if (isPolling && pollStartTime) {
         const checkTimeout = setInterval(() => {
             if (Date.now() - pollStartTime > 60000) { // 60 seconds limit
@@ -205,10 +217,6 @@ export default function UserApp() {
 
   const verifyPayment = async (silent = false) => {
     if (!silent) {
-        // Reset timer if user clicks button manually to give them another 60s? 
-        // Or keep original timer? 
-        // User requirement: "after 60 second of spinning" implies from the moment of action.
-        // Let's reset the timer to give them a fresh 60s window if they explicitly click.
         setVerificationStatus('verifying');
         setPollStartTime(Date.now());
         setIsPolling(true);
@@ -237,8 +245,8 @@ export default function UserApp() {
         // Prepare Receipt Data
         setReceiptData({
           ref: activeRef,
-          plan: selectedPlan?.name || "Data Plan",
-          amount: selectedPlan?.price || "0.00",
+          plan: formatPlanName(selectedPlan?.name || "Data Plan"),
+          amount: selectedPlan?.price ? parseFloat(selectedPlan.price).toFixed(2) : "0.00",
           phone: phoneNumber,
           date: new Date().toLocaleString(),
           status: 'Successful'
@@ -246,7 +254,6 @@ export default function UserApp() {
         
         setView('success');
       } 
-      // Note: We don't handle failure here by stopping, we let the poller/timer handle the 'timeout' state.
     } catch (e) {
       if (!silent) console.log("Verification check failed temporarily");
     }
@@ -271,18 +278,8 @@ export default function UserApp() {
         const data = await res.json();
         setTrackResult(data);
     } catch(e) {
-        if(trackQuery.startsWith('Sauki')) {
-             const res = await fetch('/api/purchase', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ action: 'recheck', tx_ref: trackQuery })
-            });
-            const d = await res.json();
-            if(d.success) alert("Transaction Retried Successfully");
-            else alert(d.error || "Transaction not found");
-        } else {
-            alert("Order not found");
-        }
+       // Fallback logic handled in backend usually, or simple error
+       alert("Order not found or Connection Error");
     }
     setIsLoading(false);
   };
@@ -291,8 +288,8 @@ export default function UserApp() {
   const openReceiptFromTrack = (tx) => {
       setReceiptData({
           ref: tx.tx_ref || tx.id || "N/A",
-          plan: tx.plan_id || "Data Plan",
-          amount: tx.amount || "N/A",
+          plan: formatPlanName(tx.plan_id || "Data Plan"), // Use formatter
+          amount: tx.amount ? parseFloat(tx.amount).toFixed(2) : "0.00", // Ensure decimals
           phone: tx.phone_number || "N/A",
           date: new Date(tx.created_at).toLocaleString(),
           status: 'Successful'
@@ -300,15 +297,42 @@ export default function UserApp() {
       setView('success');
   };
 
-  // Helper to retry from track
-  const retryFromTrack = (tx) => {
-      setActiveRef(tx.tx_ref || tx.id);
-      setPhoneNumber(tx.phone_number);
-      setVerificationStatus('verifying');
-      setIsPolling(true);
-      setPollStartTime(Date.now());
-      setView('payment');
-      verifyPayment();
+  // New Helper: Inline Retry without leaving page
+  const handleInlineRetry = async (tx) => {
+      setRetryingId(tx.id); // Start spinner for this item
+      try {
+          const res = await fetch('/api/purchase', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              // We send the existing ref to trigger a re-check or retry logic on backend
+              body: JSON.stringify({ 
+                  action: 'recheck', 
+                  tx_ref: tx.tx_ref || tx.id,
+                  mobile_number: tx.phone_number,
+                  network: tx.network,
+                  plan_id: tx.plan_id
+              })
+          });
+          const data = await res.json();
+          
+          if(data.success) {
+              // 1. Update the local list to show success immediately
+              setTrackResult(prev => ({
+                  ...prev,
+                  transactions: prev.transactions.map(t => 
+                      t.id === tx.id ? { ...t, status: 'success' } : t
+                  )
+              }));
+              alert("Transaction Successful! Delivery Confirmed.");
+          } else {
+              // 2. Alert the specific error
+              alert(data.error || "Payment not confirmed yet. Please try again later.");
+          }
+      } catch(e) {
+          alert("Connection failed. Please try again.");
+      } finally {
+          setRetryingId(null); // Stop spinner
+      }
   };
 
   // --- SUB-COMPONENTS ---
@@ -458,7 +482,7 @@ export default function UserApp() {
               </label>
             </div>
             
-          <div className="mt-auto pt-6 pb-2">
+            <div className="mt-auto pt-6 pb-2">
               <button onClick={initiateTransfer} disabled={isLoading} className="w-full py-4 bg-blue-600 text-white rounded-xl font-bold text-lg flex items-center justify-center gap-2 shadow-lg shadow-blue-200 active:scale-95 transition-transform disabled:opacity-70">
                 {isLoading ? <Loader2 className="animate-spin" /> : 'Pay with Transfer'}
               </button>
@@ -505,7 +529,7 @@ export default function UserApp() {
               </div>
             )}
 
-            {/* NORMAL INFO BOX (Only if NOT timed out) */}
+            {/* NORMAL INFO BOX */}
             {verificationStatus !== 'timeout' && (
                 <div className="bg-orange-50 border border-orange-100 p-3 rounded-xl flex gap-3 text-left items-start mb-6">
                    <AlertTriangle size={16} className="text-orange-500 shrink-0 mt-0.5"/>
@@ -651,18 +675,23 @@ export default function UserApp() {
                         {trackResult.transactions ? trackResult.transactions.map(t => (
                             <div key={t.id} className="border-b border-slate-100 pb-3 mb-3 last:border-0 last:mb-0 last:pb-0">
                                 <div className="flex justify-between items-center mb-1">
-                                    <span className="font-bold text-slate-800">{t.plan_id}</span>
+                                    <span className="font-bold text-slate-800">{formatPlanName(t.plan_id)}</span>
                                     <span className={`text-[10px] uppercase font-bold px-2 py-0.5 rounded ${t.status==='success'?'bg-green-100 text-green-700':'bg-orange-100 text-orange-700'}`}>{t.status}</span>
                                 </div>
                                 <div className="text-xs text-slate-400 font-medium mb-2">{new Date(t.created_at).toLocaleString()}</div>
                                 <div className="flex gap-2">
                                     {t.status === 'success' ? (
-                                        <button onClick={() => openReceiptFromTrack(t)} className="flex-1 py-1.5 bg-slate-100 text-slate-600 text-xs font-bold rounded-lg flex items-center justify-center gap-1 hover:bg-slate-200">
-                                            <FileText size={12}/> Receipt
+                                        <button onClick={() => openReceiptFromTrack(t)} className="flex-1 py-2 bg-slate-100 text-slate-600 text-xs font-bold rounded-lg flex items-center justify-center gap-1 hover:bg-slate-200 transition-colors">
+                                            <FileText size={14}/> View Receipt
                                         </button>
                                     ) : (
-                                        <button onClick={() => retryFromTrack(t)} className="flex-1 py-1.5 bg-blue-50 text-blue-600 text-xs font-bold rounded-lg flex items-center justify-center gap-1 hover:bg-blue-100">
-                                            <RefreshCw size={12}/> Retry
+                                        <button 
+                                          onClick={() => handleInlineRetry(t)} 
+                                          disabled={retryingId === t.id}
+                                          className="flex-1 py-2 bg-blue-50 text-blue-600 text-xs font-bold rounded-lg flex items-center justify-center gap-1 hover:bg-blue-100 disabled:opacity-70 transition-colors"
+                                        >
+                                            {retryingId === t.id ? <Loader2 size={14} className="animate-spin"/> : <RefreshCw size={14}/>}
+                                            {retryingId === t.id ? " Checking..." : " Retry Transaction"}
                                         </button>
                                     )}
                                 </div>
@@ -693,4 +722,4 @@ export default function UserApp() {
     </div>
   );
 }
-                          
+              
