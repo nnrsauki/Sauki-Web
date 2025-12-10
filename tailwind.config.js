@@ -1,8 +1,8 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: [
-    "./app/**/*.{js,ts,jsx,tsx,mdx}",
-    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./app/**/*.{js,ts,jsx,tsx,mdx}", // <--- Scans your new app folder
+    "./pages/**/*.{js,ts,jsx,tsx,mdx}", // <--- Scans your api folder (if needed)
     "./components/**/*.{js,ts,jsx,tsx,mdx}",
   ],
   theme: {
